@@ -42,14 +42,14 @@ namespace dsurcu {
   // Thread registry
   struct Registry {
     // list of thread epochs (sorted)
-    std::vector<std::atomic<uint64_t>*> epochs{};
+    std::vector<uint64_t*> epochs{};
     // epoch list must be guarded
     std::mutex mutex{};
     // lock-free list of tasks
     std::atomic<Node*> tasks{nullptr};
 
     // register a new thread
-    void register_ptr(std::atomic<uint64_t>* ptr) {
+    void register_ptr(uint64_t* ptr) {
       std::lock_guard<std::mutex> lock(mutex);
       auto it = std::lower_bound(epochs.begin(), epochs.end(), ptr);
       if (it != epochs.end() && *it == ptr) return;
@@ -57,7 +57,7 @@ namespace dsurcu {
     }
 
     // unregister a thread
-    void unregister_ptr(std::atomic<uint64_t>* ptr) {
+    void unregister_ptr(uint64_t* ptr) {
       std::lock_guard<std::mutex> lock(mutex);
       auto it = std::lower_bound(epochs.begin(), epochs.end(), ptr);
       if (it == epochs.end() || *it != ptr) return;
@@ -67,51 +67,49 @@ namespace dsurcu {
   Registry registry{};
 
   // Epoch structure
-  struct Epoch {
-    std::atomic<uint64_t> t;
-  };
-  thread_local Epoch thread_epoch;
+  thread_local uint64_t thread_epoch;
 
   // automatic register and unregister of epochs
   struct EpochRAII {
-    Epoch& ref;
-    EpochRAII(Epoch& ref) : ref(ref) {
-      registry.register_ptr(&ref.t);
+    uint64_t& ref;
+    EpochRAII(uint64_t& ref) : ref(ref) {
+      registry.register_ptr(&ref);
     }
     ~EpochRAII() {
-      registry.register_ptr(&ref.t);
+      registry.register_ptr(&ref);
     };
   };
   thread_local EpochRAII thread_epoch_raii(thread_epoch);
 
+  __attribute__((noinline,cold))
+  static void init() {
+    (void) thread_epoch_raii;
+  }
+
   // read lock
   void read_lock() {
-    // read tls epoch
-    Epoch& epoch = thread_epoch;
-    uint64_t t = epoch.t.load(std::memory_order_relaxed);
-
-    // if t is 0, epoch should be initialized properly (tls is not automatic)
-    if (__builtin_expect(t == 0, 0)) (void)thread_epoch_raii;//init();
-
-    // update epoch (+= 1)
-    epoch.t.store(t + 1, std::memory_order_relaxed);
+    uint64_t& epoch = thread_epoch;
+    if (__builtin_expect(epoch != 0, 1)) {
+      asm("":"+m"(epoch)); // force reload to break dependency
+      epoch += 1;
+      std::atomic_thread_fence(std::memory_order_acquire);
+      return;
+    }
+    epoch = 1;
     std::atomic_thread_fence(std::memory_order_acquire);
+    init();
   }
 
   // read unlock
   void read_unlock() {
-    //read tls epoch
-    Epoch& epoch = thread_epoch;
-    uint64_t t = epoch.t.load(std::memory_order_relaxed);
-
-    // update epoch (+= 1)
-    epoch.t.store(t + 1, std::memory_order_release);
+    thread_epoch += 1;
+    std::atomic_thread_fence(std::memory_order_release);
   }
 
   // wait for all threads to finish their current critical section
   void synchronize() {
     struct pair {
-      std::atomic<uint64_t>* ptr;
+      uint64_t* ptr;
       uint64_t t;
     };
     std::vector<pair> epochs, intersection;
@@ -119,8 +117,8 @@ namespace dsurcu {
 
     // find which thread is currently in a critical section
     { std::lock_guard<std::mutex> lock(registry.mutex);
-      for (std::atomic<uint64_t>* ptr : registry.epochs) {
-        uint64_t t = ptr->load(std::memory_order_relaxed);
+      for (uint64_t* ptr : registry.epochs) {
+        uint64_t t = *ptr;
         if (t&1) {
           epochs.emplace_back(pair{ptr, t});
         }
@@ -149,7 +147,7 @@ namespace dsurcu {
           } else if (*it0 > it1->ptr) {
             ++it1;
           } else /*if (*it0 == it1->ptr)*/ {
-            uint64_t t = it1->ptr->load(std::memory_order_relaxed);
+            uint64_t t = *it1->ptr;
             if (t == it1->t) {
               intersection.push_back(*it1);
             }
