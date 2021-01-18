@@ -120,7 +120,7 @@ namespace dsurcu {
     // find which thread is late
     { std::lock_guard<std::mutex> lock(registry.mutex);
       for (uint64_t* ptr : registry.epochs) {
-        uint64_t t = __atomic_load_n(ptr, __ATOMIC_ACQUIRE); // relaxed?
+        uint64_t t = __atomic_load_n(ptr, __ATOMIC_RELAXED);
         if (t < e) {
           epochs.emplace_back(pair{ptr, t});
         }
@@ -136,7 +136,7 @@ namespace dsurcu {
       // futex would most likely block as readers don't notify anybody
       futex((int*)(epochs[0].ptr), FUTEX_WAIT, epochs[0].t, &deadline, 0, 0);
 
-      // remove threads that have finished their critical section
+      // remove threads that have reach current epoch
       intersection.clear();
       { std::lock_guard<std::mutex> lock(registry.mutex);
         auto it0 = registry.epochs.begin();
@@ -149,7 +149,7 @@ namespace dsurcu {
           } else if (*it0 > it1->ptr) {
             ++it1;
           } else /*if (*it0 == it1->ptr)*/ {
-            uint64_t t = __atomic_load_n(it1->ptr, __ATOMIC_ACQUIRE);
+            uint64_t t = __atomic_load_n(it1->ptr, __ATOMIC_RELAXED);
             if (t < e) {
               intersection.push_back(*it1);
             }
@@ -162,7 +162,7 @@ namespace dsurcu {
     }
 
     // memory fence
-    std::atomic_thread_fence(std::memory_order_acquire);
+    std::atomic_thread_fence(std::memory_order_acq_rel);
   }
 
   // retrieve all tasks and wait for all threads
@@ -175,6 +175,9 @@ namespace dsurcu {
 
     // wait for all threads
     synchronize();
+
+    // memory fence
+    std::atomic_thread_fence(std::memory_order_acq_rel);
 
     // process all the tasks and free their nodes
     do {
@@ -258,6 +261,9 @@ int main() {
       dsurcu::queue([=]() {
         printf("task from thread #%d\n", i);
       });
+      std::this_thread::sleep_for(std::chrono::duration<double>(rand()));
+      dsurcu::update_epoch();
+      printf("thread #%d quiescent\n", i);
       std::this_thread::sleep_for(std::chrono::duration<double>(5*rand()));
       printf("thread #%d stop\n", i);
     }, i, n);
