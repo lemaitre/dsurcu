@@ -66,7 +66,9 @@ namespace dsurcu {
   };
   Registry registry{};
 
-  // Epoch structure
+  // Global Epoch
+  uint64_t epoch = 1;
+  // Local Epoch
   thread_local uint64_t thread_epoch;
 
   // automatic register and unregister of epochs
@@ -76,38 +78,38 @@ namespace dsurcu {
       registry.register_ptr(&ref);
     }
     ~EpochRAII() {
-      registry.register_ptr(&ref);
+      registry.unregister_ptr(&ref);
     };
   };
   thread_local EpochRAII thread_epoch_raii(thread_epoch);
 
+  // synchronize local epoch to global one
+  void update_epoch() {
+    uint64_t e = __atomic_load_n(&epoch, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&thread_epoch, e, __ATOMIC_RELEASE);
+  }
+
   __attribute__((noinline,cold))
   static void init() {
     (void) thread_epoch_raii;
+    update_epoch();
   }
 
   // read lock
   void read_lock() {
-    uint64_t& epoch = thread_epoch;
-    if (__builtin_expect(epoch != 0, 1)) {
-      asm("":"+m"(epoch)); // force reload to break dependency
-      epoch += 1;
-      std::atomic_thread_fence(std::memory_order_acquire);
-      return;
+    if (__builtin_expect(thread_epoch == 0, 0)) {
+      init();
     }
-    epoch = 1;
-    std::atomic_thread_fence(std::memory_order_acquire);
-    init();
   }
 
   // read unlock
   void read_unlock() {
-    thread_epoch += 1;
-    std::atomic_thread_fence(std::memory_order_release);
+    update_epoch();
   }
 
   // wait for all threads to finish their current critical section
   void synchronize() {
+    uint64_t e = __atomic_add_fetch(&epoch, 1, __ATOMIC_ACQ_REL);
     struct pair {
       uint64_t* ptr;
       uint64_t t;
@@ -115,18 +117,18 @@ namespace dsurcu {
     std::vector<pair> epochs, intersection;
     epochs.reserve(registry.epochs.size());
 
-    // find which thread is currently in a critical section
+    // find which thread is late
     { std::lock_guard<std::mutex> lock(registry.mutex);
       for (uint64_t* ptr : registry.epochs) {
-        uint64_t t = *ptr;
-        if (t&1) {
+        uint64_t t = __atomic_load_n(ptr, __ATOMIC_ACQUIRE); // relaxed?
+        if (t < e) {
           epochs.emplace_back(pair{ptr, t});
         }
       }
     }
     intersection.reserve(epochs.size());
 
-    // wait for all threads to finish their current critical section
+    // wait for all threads to get to current epoch
     while (!epochs.empty()) {
       struct timespec deadline;
       deadline.tv_sec = 0;
@@ -147,8 +149,8 @@ namespace dsurcu {
           } else if (*it0 > it1->ptr) {
             ++it1;
           } else /*if (*it0 == it1->ptr)*/ {
-            uint64_t t = *it1->ptr;
-            if (t == it1->t) {
+            uint64_t t = __atomic_load_n(it1->ptr, __ATOMIC_ACQUIRE);
+            if (t < e) {
               intersection.push_back(*it1);
             }
             ++it0;
@@ -189,7 +191,7 @@ namespace dsurcu {
     Node* tail = registry.tasks.load(std::memory_order_relaxed);
     Node* head = new Node{tail, std::move(f)};
     // push front the new task (lock-free)
-    while (!registry.tasks.compare_exchange_weak(tail, head, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    while (!registry.tasks.compare_exchange_weak(tail, head, std::memory_order_acq_rel, std::memory_order_relaxed)) {
       head->next = tail;
       _mm_pause();
     }
@@ -219,7 +221,7 @@ int main() {
       futex((int*)(&dsurcu::registry.tasks), FUTEX_WAIT, 0, 0, 0, 0);
 
       // keep going as long as there are tasks
-      while (dsurcu::registry.tasks.load()) {
+      while (dsurcu::registry.tasks.load(std::memory_order_relaxed)) {
         dsurcu::synchronize_all();
       }
 
