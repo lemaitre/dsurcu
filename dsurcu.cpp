@@ -252,6 +252,7 @@ namespace dsurcu {
 
     // Delay current thread (should be enough for writer values to propagate to readers)
     _mm_clflush(&registry.mutex);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
 
     // find which thread is late
     { std::lock_guard<std::mutex> lock(registry.mutex);
