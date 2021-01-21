@@ -100,7 +100,7 @@ namespace dsurcu {
       epochs.reserve(registry.epochs.size());
       for (std::atomic<uint64_t>* ptr : registry.epochs) {
         uint64_t t = ptr->fetch_add(unoptimizable_zero(), std::memory_order_relaxed);
-        //uint64_t t = ptr->load(std::memory_order_relaxed);
+        //uint64_t t = ptr->load(std::memory_order_relaxed); // doesn't work
         if (t&1) {
           epochs.emplace_back(pair{ptr, t});
         }
@@ -108,7 +108,7 @@ namespace dsurcu {
     }
     intersection.reserve(epochs.size());
 
-    // wait for all threads to get to current epoch
+    // wait for all threads to exit their critical section
     while (!epochs.empty()) {
       struct timespec deadline;
       deadline.tv_sec = 0;
@@ -130,7 +130,7 @@ namespace dsurcu {
             ++it1;
           } else /*if (*it0 == it1->ptr)*/ {
             uint64_t t = it1->ptr->fetch_add(unoptimizable_zero(), std::memory_order_relaxed);
-            //uint64_t t = it1->ptr->load(std::memory_order_relaxed);
+            //uint64_t t = it1->ptr->load(std::memory_order_relaxed); // doesn't work
             if (t == it1->t) {
               intersection.push_back(*it1);
             }
@@ -250,15 +250,12 @@ namespace dsurcu {
     };
     std::vector<pair> epochs, intersection;
 
-    // Release for all epoch that will be written (propagate resource values)
-    std::atomic_thread_fence(std::memory_order_release);
+    // Delay current thread (should be enough for writer values to propagate to readers)
+    _mm_clflush(&registry.mutex);
 
     // find which thread is late
     { std::lock_guard<std::mutex> lock(registry.mutex);
       epochs.reserve(registry.epochs.size());
-      for (std::atomic<uint64_t>* ptr : registry.epochs) {
-        _mm_clflush(ptr);
-      }
       for (std::atomic<uint64_t>* ptr : registry.epochs) {
         uint64_t t = ptr->load(std::memory_order_relaxed);
         if (t&1) {
@@ -268,7 +265,7 @@ namespace dsurcu {
     }
     intersection.reserve(epochs.size());
 
-    // wait for all threads to get to current epoch
+    // wait for all threads to exit their critical section
     while (!epochs.empty()) {
       struct timespec deadline;
       deadline.tv_sec = 0;
@@ -420,8 +417,7 @@ namespace dsurcu {
     { std::lock_guard<std::mutex> lock(registry.mutex);
       epochs.reserve(registry.epochs.size());
       for (std::atomic<uint64_t>* ptr : registry.epochs) {
-        uint64_t t = ptr->fetch_add(unoptimizable_zero(), std::memory_order_relaxed);
-        //uint64_t t = ptr->load(std::memory_order_relaxed); // don't work
+        uint64_t t = ptr->load(std::memory_order_relaxed);
         if (t <= epoch) {
           epochs.emplace_back(pair{ptr, t});
         }
@@ -450,8 +446,7 @@ namespace dsurcu {
           } else if (*it0 > it1->ptr) {
             ++it1;
           } else /*if (*it0 == it1->ptr)*/ {
-            uint64_t t = it1->ptr->fetch_add(unoptimizable_zero(), std::memory_order_relaxed);
-            //uint64_t t = it1->ptr->load(std::memory_order_relaxed); // don't work
+            uint64_t t = it1->ptr->load(std::memory_order_relaxed);
             if (t <= epoch) {
               intersection.push_back(*it1);
             }
