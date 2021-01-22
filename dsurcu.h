@@ -143,7 +143,6 @@ namespace dsurcu {
     }
     static void read_unlock() noexcept {
       std::atomic<uint64_t>& epoch = local_epoch;
-      // There is no need here for an atomic RMW
       uint64_t e = epoch.load(std::memory_order_relaxed);
       e += 1;
       epoch.store(e, std::memory_order_release);
@@ -179,7 +178,7 @@ namespace dsurcu {
       std::atomic<uint64_t>& global = global_epoch;
       std::atomic<uint64_t>& local = local_epoch;
       uint64_t e = global.load(std::memory_order_acquire);
-      local.store(std::memory_order_release);
+      local.store(e, std::memory_order_release);
     }
 
     static void queue(std::function<void()>);

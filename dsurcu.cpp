@@ -71,10 +71,10 @@ namespace dsurcu {
   }
   void LocalEpoch::queue(std::function<void()> f) {
     Registry& registry = LocalEpoch::registry;
-    Node* tail = registry.tasks.load(std::memory_order_relaxed);
+    Node* tail = registry.tasks.load(std::memory_order_acquire);
     Node* head = new Node{tail, std::move(f)};
     // push front the new task (lock-free)
-    while (!registry.tasks.compare_exchange_weak(tail, head, std::memory_order_release, std::memory_order_relaxed)) {
+    while (!registry.tasks.compare_exchange_weak(tail, head, std::memory_order_acq_rel)) {
       head->next = tail;
       _mm_pause();
     }
@@ -129,8 +129,8 @@ namespace dsurcu {
           } else if (*it0 > it1->ptr) {
             ++it1;
           } else /*if (*it0 == it1->ptr)*/ {
-            uint64_t t = it1->ptr->fetch_add(unoptimizable_zero(), std::memory_order_relaxed);
-            //uint64_t t = it1->ptr->load(std::memory_order_relaxed); // doesn't work
+            // RMW is not necessary here as the release has already been done by a previous one
+            uint64_t t = it1->ptr->load(std::memory_order_relaxed);
             if (t == it1->t) {
               intersection.push_back(*it1);
             }
@@ -229,10 +229,10 @@ namespace dsurcu {
   }
   void LocalEpochWeak::queue(std::function<void()> f) {
     Registry& registry = LocalEpochWeak::registry;
-    Node* tail = registry.tasks.load(std::memory_order_relaxed);
+    Node* tail = registry.tasks.load(std::memory_order_acquire);
     Node* head = new Node{tail, std::move(f)};
     // push front the new task (lock-free)
-    while (!registry.tasks.compare_exchange_weak(tail, head, std::memory_order_release, std::memory_order_relaxed)) {
+    while (!registry.tasks.compare_exchange_weak(tail, head, std::memory_order_acq_rel)) {
       head->next = tail;
       _mm_pause();
     }
@@ -251,8 +251,8 @@ namespace dsurcu {
     std::vector<pair> epochs, intersection;
 
     // Delay current thread (should be enough for writer values to propagate to readers)
-    _mm_clflush(&registry.mutex);
     std::atomic_thread_fence(std::memory_order_seq_cst);
+    std::this_thread::yield();
 
     // find which thread is late
     { std::lock_guard<std::mutex> lock(registry.mutex);
@@ -387,10 +387,10 @@ namespace dsurcu {
   }
   void GlobalEpoch::queue(std::function<void()> f) {
     Registry& registry = GlobalEpoch::registry;
-    Node* tail = registry.tasks.load(std::memory_order_relaxed);
+    Node* tail = registry.tasks.load(std::memory_order_acquire);
     Node* head = new Node{tail, std::move(f)};
     // push front the new task (lock-free)
-    while (!registry.tasks.compare_exchange_weak(tail, head, std::memory_order_release, std::memory_order_relaxed)) {
+    while (!registry.tasks.compare_exchange_weak(tail, head, std::memory_order_acq_rel)) {
       head->next = tail;
       _mm_pause();
     }
