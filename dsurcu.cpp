@@ -17,6 +17,15 @@
 #include <linux/futex.h>
 #include <sys/time.h>
 #include <x86intrin.h>
+
+#ifndef TASK_FUTEX
+#define TASK_FUTEX 0
+#endif
+#ifndef EPOCH_FUTEX
+#define EPOCH_FUTEX 0
+#endif
+
+
 // futex syscall
 static int futex(int *uaddr, int futex_op, int val, const struct timespec *timeout, int *uaddr2, int val3) {
   return syscall(SYS_futex, uaddr, futex_op, val, timeout, uaddr2, val3);
@@ -79,10 +88,12 @@ namespace dsurcu {
       _mm_pause();
     }
 
+#if TASK_FUTEX
     // if there was no task in list, we wake the rcu thread
     if (tail == nullptr) {
       futex((int*)(&registry.tasks), FUTEX_WAKE, 1, 0, 0, 0);
     }
+#endif
   }
   void LocalEpoch::synchronize() {
     Registry& registry = LocalEpoch::registry;
@@ -114,7 +125,11 @@ namespace dsurcu {
       deadline.tv_sec = 0;
       deadline.tv_nsec = 1000000; // 1 ms
       // futex would most likely block as readers don't notify anybody
+#if EPOCH_FUTEX
       futex((int*)(epochs[0].ptr), FUTEX_WAIT, epochs[0].t, &deadline, 0, 0);
+#else
+      std::this_thread::yield();
+#endif
 
       // remove threads that have reach current epoch
       intersection.clear();
@@ -171,7 +186,11 @@ namespace dsurcu {
     Registry& registry = LocalEpoch::registry;
 
     // wait for a task
+#if TASK_FUTEX
     futex((int*)(&registry.tasks), FUTEX_WAIT, 0, 0, 0, 0);
+#else
+    std::this_thread::yield();
+#endif
 
     // keep going as long as there are tasks
     while (registry.tasks.load(std::memory_order_relaxed)) {
@@ -179,8 +198,10 @@ namespace dsurcu {
     }
   }
   void LocalEpoch::wake_worker() {
+#if TASK_FUTEX
     Registry& registry = LocalEpoch::registry;
     futex((int*)(&registry.tasks), FUTEX_WAKE, 1, 0, 0, 0);
+#endif
   }
 
   Delay<LocalEpoch::Registry> LocalEpoch::registry;
@@ -237,10 +258,12 @@ namespace dsurcu {
       _mm_pause();
     }
 
+#if TASK_FUTEX
     // if there was no task in list, we wake the rcu thread
     if (tail == nullptr) {
       futex((int*)(&registry.tasks), FUTEX_WAKE, 1, 0, 0, 0);
     }
+#endif
   }
   void LocalEpochWeak::synchronize() {
     Registry& registry = LocalEpochWeak::registry;
@@ -250,8 +273,19 @@ namespace dsurcu {
     };
     std::vector<pair> epochs, intersection;
 
-    // Delay current thread (should be enough for writer values to propagate to readers)
     std::atomic_thread_fence(std::memory_order_seq_cst);
+
+    // propagate new resource values
+    { std::lock_guard<std::mutex> lock(registry.mutex);
+      epochs.reserve(registry.epochs.size());
+      for (std::atomic<uint64_t>* ptr : registry.epochs) {
+        ptr->fetch_add(unoptimizable_zero());
+      }
+    }
+
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+
+    // Delay current thread (should be enough for writer values to propagate to readers)
     std::this_thread::yield();
 
     // find which thread is late
@@ -272,7 +306,11 @@ namespace dsurcu {
       deadline.tv_sec = 0;
       deadline.tv_nsec = 1000000; // 1 ms
       // futex would most likely block as readers don't notify anybody
+#if EPOCH_FUTEX
       futex((int*)(epochs[0].ptr), FUTEX_WAIT, epochs[0].t, &deadline, 0, 0);
+#else
+      std::this_thread::yield();
+#endif
 
       // remove threads that have reach current epoch
       intersection.clear();
@@ -328,7 +366,11 @@ namespace dsurcu {
     Registry& registry = LocalEpochWeak::registry;
 
     // wait for a task
+#if TASK_FUTEX
     futex((int*)(&registry.tasks), FUTEX_WAIT, 0, 0, 0, 0);
+#else
+    std::this_thread::yield();
+#endif
 
     // keep going as long as there are tasks
     while (registry.tasks.load(std::memory_order_relaxed)) {
@@ -336,8 +378,10 @@ namespace dsurcu {
     }
   }
   void LocalEpochWeak::wake_worker() {
+#if TASK_FUTEX
     Registry& registry = LocalEpochWeak::registry;
     futex((int*)(&registry.tasks), FUTEX_WAKE, 1, 0, 0, 0);
+#endif
   }
 
   Delay<LocalEpochWeak::Registry> LocalEpochWeak::registry;
@@ -395,10 +439,12 @@ namespace dsurcu {
       _mm_pause();
     }
 
+#if TASK_FUTEX
     // if there was no task in list, we wake the rcu thread
     if (tail == nullptr) {
       futex((int*)(&registry.tasks), FUTEX_WAKE, 1, 0, 0, 0);
     }
+#endif
   }
   void GlobalEpoch::synchronize() {
     std::atomic<uint64_t>& global = global_epoch;
@@ -432,7 +478,11 @@ namespace dsurcu {
       deadline.tv_sec = 0;
       deadline.tv_nsec = 1000000; // 1 ms
       // futex would most likely block as readers don't notify anybody
+#if EPOCH_FUTEX
       futex((int*)(epochs[0].ptr), FUTEX_WAIT, epochs[0].t, &deadline, 0, 0);
+#else
+      std::this_thread::yield();
+#endif
 
       // remove threads that have reach current epoch
       intersection.clear();
@@ -488,7 +538,11 @@ namespace dsurcu {
     Registry& registry = GlobalEpoch::registry;
 
     // wait for a task
+#if TASK_FUTEX
     futex((int*)(&registry.tasks), FUTEX_WAIT, 0, 0, 0, 0);
+#else
+    std::this_thread::yield();
+#endif
 
     // keep going as long as there are tasks
     while (registry.tasks.load(std::memory_order_relaxed)) {
@@ -496,8 +550,10 @@ namespace dsurcu {
     }
   }
   void GlobalEpoch::wake_worker() {
+#if TASK_FUTEX
     Registry& registry = GlobalEpoch::registry;
     futex((int*)(&registry.tasks), FUTEX_WAKE, 1, 0, 0, 0);
+#endif
   }
 
   Delay<GlobalEpoch::Registry> GlobalEpoch::registry;

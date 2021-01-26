@@ -13,7 +13,9 @@ namespace dsurcu {
 
   template <class T>
   struct Delay {
+    alignas(64) char dummy0[64];
     alignas(alignof(T)) char mem[sizeof(T)];
+    alignas(64) char dummy1[64];
 
     T      &  get()      &  noexcept { return reinterpret_cast<T      & >(mem); }
     T      && get()      && noexcept { return reinterpret_cast<T      &&>(mem); }
@@ -42,8 +44,12 @@ namespace dsurcu {
     static void thread_fini() noexcept {}
     static void fini() noexcept {}
 
-    static void read_lock() noexcept {}
-    static void read_unlock() noexcept {}
+    static void read_lock() noexcept {
+      std::atomic_thread_fence(std::memory_order_acquire);
+    }
+    static void read_unlock() noexcept {
+      std::atomic_thread_fence(std::memory_order_release);
+    }
     static void quiescent() noexcept {}
 
     template <class F> // F shall be convertible to std::function<void()>

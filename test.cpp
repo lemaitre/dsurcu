@@ -13,12 +13,93 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <random>
 #include <cstdint>
 #include <cstdio>
+#include <x86intrin.h>
 
 #include "dsurcu.h"
 
+template <class rcu, class Derived>
+struct Worker {
+  using RCU = rcu;
+  std::atomic<std::atomic<uint64_t>*>* time;
+  std::vector<uint64_t>* writer_data;
+  long niter;
+  double read_ratio;
 
-int main() {
-  using RCU = dsurcu::LocalEpochWeak;
+  Worker(std::atomic<std::atomic<uint64_t>*>& time, std::vector<uint64_t>& writer_data, long niter, double read_ratio) : time(&time), writer_data(&writer_data), niter(niter), read_ratio(read_ratio) {}
+  void consume(std::atomic<uint64_t>*) const = delete;
+
+  static void reclaim(std::atomic<uint64_t>*, std::vector<uint64_t>*) {}
+
+  __attribute__((noinline))
+  void operator()() const {
+    double reads = 0., accesses = 1.;
+
+    for (long i = 0; i < niter; i += 1) {
+      std::atomic<uint64_t>* p;
+      if (reads <= accesses * read_ratio) {
+        RCU::read_lock();
+        p = time->load(std::memory_order_relaxed);
+        static_cast<Derived const*>(this)->consume(p);
+        RCU::read_unlock();
+        reads += 1.;
+      } else {
+        std::atomic<uint64_t> *p;
+        p = new std::atomic<uint64_t>(_rdtsc());
+        p = time->exchange(p, std::memory_order_acq_rel);
+        std::vector<uint64_t>* writer_data = this->writer_data;
+        RCU::queue([p,writer_data]() {
+          Derived::reclaim(p, writer_data);
+          delete p;
+        });
+      }
+      //RCU::quiescent();
+      accesses += 1.;
+    }
+  }
+};
+
+template <class RCU>
+struct WorkerRead : public Worker<RCU, WorkerRead<RCU>> {
+  using Worker<RCU, WorkerRead<RCU>>::Worker;
+  using Worker<RCU, WorkerRead<RCU>>::operator=;
+
+  void consume(std::atomic<uint64_t>* p) const {
+    uint64_t dummy = p->load(std::memory_order_relaxed);
+    asm (""::"r"(dummy));
+  }
+};
+
+template <class RCU>
+struct WorkerWrite : public Worker<RCU, WorkerWrite<RCU>> {
+  using Worker<RCU, WorkerWrite<RCU>>::Worker;
+  using Worker<RCU, WorkerWrite<RCU>>::operator=;
+
+  void consume(std::atomic<uint64_t>* p) const {
+    uint64_t zero = 0;
+    asm("":"+rm"(zero));
+    p->store(zero, std::memory_order_relaxed);
+  }
+};
+
+template <class RCU>
+struct WorkerRDTSC : public Worker<RCU, WorkerRDTSC<RCU>> {
+  using Worker<RCU, WorkerRDTSC<RCU>>::Worker;
+  using Worker<RCU, WorkerRDTSC<RCU>>::operator=;
+
+  void consume(std::atomic<uint64_t>* p) const {
+    p->store(_rdtsc(), std::memory_order_relaxed);
+  }
+
+  static void reclaim(std::atomic<uint64_t>* p, std::vector<uint64_t>* writer_data) {
+    uint64_t t1 = _rdtsc();
+    uint64_t t0 = p->load(std::memory_order_acquire);
+    writer_data->emplace_back(t1 - t0);
+  }
+};
+
+template <class Worker>
+void bench(int nthreads, long niter, double read_ratio) {
+  using RCU = typename Worker::RCU;
   RCU::init();
 
   // RCU thread: when there is some tasks to complete, wait for readers to finish their critical sections
@@ -31,47 +112,48 @@ int main() {
   });
 
 
-  // thread-safe random number generator
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_real_distribution<> distrib(0.0, 1.);
-  std::mutex mutex;
-  auto rand = [&]() {
-    std::lock_guard<std::mutex> lock(mutex);
-    return distrib(gen);
-  };
+  std::vector<uint64_t> writer_data;
+  writer_data.reserve(niter * nthreads * std::max(0., 1. - read_ratio) + nthreads + 1);
 
-  // spawn some worker to demonstrate RCU
-  int n = 10;
   std::vector<std::thread> workers;
-  workers.reserve(n);
-  for (int i = 0; i < n; ++i) {
-    workers.emplace_back([&rand](int i, int n) {
-      printf("thread #%d start\n", i);
+  std::vector<uint64_t> worker_data(nthreads);
+  workers.reserve(nthreads);
+
+  std::atomic<std::atomic<uint64_t>*> time;
+  time.store(new std::atomic<uint64_t>(_rdtsc()));
+
+  std::atomic<int> barrier{nthreads};
+
+  for (int t = 0; t < nthreads; ++t) {
+    workers.emplace_back([&, t]() {
       RCU::thread_init();
-      std::this_thread::sleep_for(std::chrono::duration<double>(2*rand()));
-      RCU::read_lock();
-      printf("thread #%d lock\n", i);
-      std::this_thread::sleep_for(std::chrono::duration<double>(rand()));
-      printf("thread #%d unlock\n", i);
-      RCU::read_unlock();
-      std::this_thread::sleep_for(std::chrono::duration<double>(0.5*rand()));
-      printf("thread #%d task queue\n", i);
-      RCU::queue([=]() {
-        printf("task from thread #%d\n", i);
-      });
-      std::this_thread::sleep_for(std::chrono::duration<double>(rand()));
-      RCU::quiescent();
-      printf("thread #%d quiescent\n", i);
-      std::this_thread::sleep_for(std::chrono::duration<double>(5*rand()));
-      printf("thread #%d stop\n", i);
+
+      Worker work(time, writer_data, niter, read_ratio);
+
+
+      barrier.fetch_sub(1, std::memory_order_release);
+      int b;
+      do {
+        _mm_pause();
+        b = barrier.load(std::memory_order_relaxed);
+      } while (b > 0);
+      std::atomic_thread_fence(std::memory_order_acquire);
+
+      uint64_t t0 = _rdtsc();
+
+      work();
+
+      uint64_t t1 = _rdtsc();
+
       RCU::thread_fini();
-    }, i, n);
+
+      worker_data[t] = t1 - t0;
+    });
   }
 
   // wait for all workers to finish
-  for (auto& t : workers) {
-    t.join();
+  for (auto& w : workers) {
+    w.join();
   }
 
   // stop the RCU thread
@@ -80,4 +162,73 @@ int main() {
   rcu.join();
 
   RCU::fini();
+
+  std::atomic<uint64_t> *p = time.load(std::memory_order_acquire);
+  delete p;
+
+
+  if (worker_data.size() > 0) {
+    int n = worker_data.size();
+    std::sort(worker_data.begin(), worker_data.end());
+    double min = double(worker_data.front()) / double(niter);
+    double max = double(worker_data.back()) / double(niter);
+    double med = double(worker_data[0.5*n]) / double(niter);
+    uint64_t s1 = 0;
+    for (uint64_t delay : worker_data) {
+      s1 += delay;
+    }
+    double avg = double(s1) / double(n * niter);
+
+    printf("    processing time: % 6lg\t(min: % 6lg\tmed: % 6lg\tmax: % 6lg)\n", avg, min, med, max);
+  }
+  if (writer_data.size() > 2) {
+    long n = writer_data.size();
+    std::sort(writer_data.begin(), writer_data.end());
+    double min = writer_data.front();
+    double max = writer_data.back();
+    double p50 = writer_data[0.50*n];
+    double p90 = writer_data[0.90*n];
+    double p99 = writer_data[0.99*n];
+    uint64_t s1 = 0, s2 = 0;
+    for (uint64_t delay : writer_data) {
+      s1 += delay;
+      s2 += delay*delay;
+    }
+    double avg = double(s1) / double(n);
+    double var = (double(s2) - double(s1*s1) / double(n)) / double(n);
+    double err = std::sqrt(var);
+
+    printf("    Delay stat (%ld writes):\n", n);
+    printf("    avg: % 6lg +- % 6lg\n", avg, err);
+    printf("    min: % 6lg\n", min);
+    printf("    50%%: % 6lg\n", p50);
+    printf("    90%%: % 6lg\n", p90);
+    printf("    99%%: % 6lg\n", p99);
+    printf("    max: % 6lg\n", max);
+  }
+}
+
+template <class RCU>
+void bench_rcu(int nthreads, long niter, float ratio) {
+  printf("  Read:\n");
+  bench<WorkerRead<RCU>>(nthreads, niter, ratio);
+  printf("  Write:\n");
+  bench<WorkerWrite<RCU>>(nthreads, niter, ratio);
+  printf("  RDTSC:\n");
+  bench<WorkerRDTSC<RCU>>(nthreads, niter, ratio);
+}
+
+
+int main() {
+  int nthreads = 10;
+  long niter = 1e6;
+  double ratio = 0.0;
+  printf("Noop:\n");
+  bench_rcu<dsurcu::Noop>(nthreads, niter, ratio);
+  printf("\nLocalEpochWeak:\n");
+  bench_rcu<dsurcu::LocalEpochWeak>(nthreads, niter, ratio);
+  printf("\nGlobalEpoch:\n");
+  bench_rcu<dsurcu::GlobalEpoch>(nthreads, niter, ratio);
+  printf("\nLocalEpoch:\n");
+  bench_rcu<dsurcu::LocalEpoch>(nthreads, niter, ratio);
 }
