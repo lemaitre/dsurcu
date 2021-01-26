@@ -7,15 +7,67 @@
 namespace dsurcu {
   // Node for task queueing
   struct Node {
-    Node* next = nullptr;
-    std::function<void()> callback{};
+    void* allocd;
+    void (*reclaim)(Node*);
+    int n;
+    Node* next;
+
+    static Node* get(void* p) noexcept {
+      return (Node*)((char*)p - sizeof(Node));
+    }
+    void* data() noexcept {
+      return (char*)this + sizeof(Node);
+    }
+    template <class T>
+    T* data() noexcept {
+      return (T*)(data());
+    }
+    static void del(Node* node) {
+      delete[]((char*)node->allocd);
+    }
+    template <class T>
+    static void del(Node* node) {
+      T* p = node->data<T>();
+      for (int i = 0; i < node->n; ++i) {
+        p[i].~T();
+      }
+      del(node);
+    }
   };
+
+  inline void* rcu_allocate(size_t size, size_t align) {
+    align &= -align;
+    if (align < alignof(Node)) align = alignof(Node);
+    char* allocd = new char[size + sizeof(Node) + align];
+    char* p = (char*)(((uintptr_t) allocd + sizeof(Node) + align-1) & -align);
+    Node* node = Node::get(p);
+    node->allocd = allocd;
+    node->n = size;
+    node->next = nullptr;
+    node->reclaim = Node::del;
+    return p;
+  };
+
+  inline void rcu_deallocate(void* p) {
+    Node* node = Node::get(p);
+    node->reclaim(node);
+  }
+
+  template <class T>
+  T* rcu_allocate(size_t n = 1, size_t align = alignof(T)) {
+    void* p = rcu_allocate(n * sizeof(T), align);
+    Node* node = Node::get(p);
+    node->reclaim = Node::del<T>;
+    node->n = n;
+    for (int i = 0; i < n; ++i) {
+      new ((char*)p + i * sizeof(T)) T;
+    }
+    return (T*)p;
+  }
 
   template <class T>
   struct Delay {
-    alignas(64) char dummy0[64];
     alignas(alignof(T)) char mem[sizeof(T)];
-    alignas(64) char dummy1[64];
 
     T      &  get()      &  noexcept { return reinterpret_cast<T      & >(mem); }
     T      && get()      && noexcept { return reinterpret_cast<T      &&>(mem); }
@@ -52,8 +104,7 @@ namespace dsurcu {
     }
     static void quiescent() noexcept {}
 
-    template <class F> // F shall be convertible to std::function<void()>
-    static void queue(F const&) noexcept {}
+    static void queue(void*) noexcept {}
     static void synchronize() noexcept {}
     static void process_queue() noexcept {}
     static void process_queue_wait() noexcept;
@@ -124,7 +175,7 @@ namespace dsurcu {
     }
     static void quiescent() noexcept {}
 
-    static void queue(std::function<void()>);
+    static void queue(void*);
     static void synchronize();
     static void process_queue();
     static void process_queue_wait();
@@ -157,7 +208,7 @@ namespace dsurcu {
     }
     static void quiescent() noexcept {}
 
-    static void queue(std::function<void()>);
+    static void queue(void*);
     static void synchronize();
     static void process_queue();
     static void process_queue_wait();
@@ -190,7 +241,7 @@ namespace dsurcu {
       local.store(e, std::memory_order_release);
     }
 
-    static void queue(std::function<void()>);
+    static void queue(void*);
     static void synchronize();
     static void process_queue();
     static void process_queue_wait();

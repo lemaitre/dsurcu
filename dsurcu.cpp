@@ -87,10 +87,11 @@ namespace dsurcu {
   void LocalEpoch::fini() {
     registry.destruct();
   }
-  void LocalEpoch::queue(std::function<void()> f) {
+  void LocalEpoch::queue(void* p) {
     Registry& registry = LocalEpoch::registry;
     Node* tail = registry.tasks.load(std::memory_order_acquire);
-    Node* head = new Node{tail, std::move(f)};
+    Node* head = Node::get(p);
+    head->next = tail;
     // push front the new task (lock-free)
     while (!registry.tasks.compare_exchange_weak(tail, head, std::memory_order_acq_rel)) {
       head->next = tail;
@@ -186,8 +187,7 @@ namespace dsurcu {
     do {
       Node* task = tasks;
       tasks = task->next;
-      task->callback();
-      delete task;
+      task->reclaim(task);
     } while (tasks);
   }
 
@@ -258,10 +258,11 @@ namespace dsurcu {
   void LocalEpochWeak::fini() {
     registry.destruct();
   }
-  void LocalEpochWeak::queue(std::function<void()> f) {
+  void LocalEpochWeak::queue(void* p) {
     Registry& registry = LocalEpochWeak::registry;
     Node* tail = registry.tasks.load(std::memory_order_acquire);
-    Node* head = new Node{tail, std::move(f)};
+    Node* head = Node::get(p);
+    head->next = tail;
     // push front the new task (lock-free)
     while (!registry.tasks.compare_exchange_weak(tail, head, std::memory_order_acq_rel)) {
       head->next = tail;
@@ -367,8 +368,7 @@ namespace dsurcu {
     do {
       Node* task = tasks;
       tasks = task->next;
-      task->callback();
-      delete task;
+      task->reclaim(task);
     } while (tasks);
   }
 
@@ -440,10 +440,11 @@ namespace dsurcu {
     registry.destruct();
     global_epoch.destruct();
   }
-  void GlobalEpoch::queue(std::function<void()> f) {
+  void GlobalEpoch::queue(void* p) {
     Registry& registry = GlobalEpoch::registry;
     Node* tail = registry.tasks.load(std::memory_order_acquire);
-    Node* head = new Node{tail, std::move(f)};
+    Node* head = Node::get(p);
+    head->next = tail;
     // push front the new task (lock-free)
     while (!registry.tasks.compare_exchange_weak(tail, head, std::memory_order_acq_rel)) {
       head->next = tail;
@@ -540,8 +541,7 @@ namespace dsurcu {
     do {
       Node* task = tasks;
       tasks = task->next;
-      task->callback();
-      delete task;
+      task->reclaim(task);
     } while (tasks);
   }
 

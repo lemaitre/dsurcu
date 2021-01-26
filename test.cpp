@@ -16,43 +16,48 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <x86intrin.h>
 
 #include "dsurcu.h"
+struct Counter {
+  std::atomic<uint64_t> time{};
+  std::vector<uint64_t>* writer_data = nullptr;
+};
 
 template <class rcu, class Derived>
 struct Worker {
   using RCU = rcu;
-  std::atomic<std::atomic<uint64_t>*>* time;
+  std::atomic<Counter*>* time;
   std::vector<uint64_t>* writer_data;
   long niter;
   double read_ratio;
 
-  Worker(std::atomic<std::atomic<uint64_t>*>& time, std::vector<uint64_t>& writer_data, long niter, double read_ratio) : time(&time), writer_data(&writer_data), niter(niter), read_ratio(read_ratio) {}
+  Worker(std::atomic<Counter*>& time, std::vector<uint64_t>& writer_data, long niter, double read_ratio) : time(&time), writer_data(&writer_data), niter(niter), read_ratio(read_ratio) {}
   void consume(std::atomic<uint64_t>*) const = delete;
 
-  static void reclaim(std::atomic<uint64_t>*, std::vector<uint64_t>*) {}
+  static void reclaim(Counter*) {}
 
   __attribute__((noinline))
   void operator()() const {
     double reads = 0., accesses = 1.;
 
     for (long i = 0; i < niter; i += 1) {
-      std::atomic<uint64_t>* p;
+      Counter* p;
       if (reads <= accesses * read_ratio) {
         RCU::read_lock();
         p = time->load(std::memory_order_relaxed);
-        static_cast<Derived const*>(this)->consume(p);
+        static_cast<Derived const*>(this)->consume(&p->time);
         RCU::read_unlock();
         reads += 1.;
       } else {
-        std::atomic<uint64_t> *p;
-        p = new std::atomic<uint64_t>(_rdtsc());
+        p = dsurcu::rcu_allocate<Counter>();
+        p->time.store(_rdtsc(), std::memory_order_relaxed);
+        p->writer_data = writer_data;
         p = time->exchange(p, std::memory_order_acq_rel);
-        std::vector<uint64_t>* writer_data = this->writer_data;
-        RCU::queue([p,writer_data]() {
-          Derived::reclaim(p, writer_data);
-          delete p;
-        });
+        dsurcu::Node::get(p)->reclaim = [](dsurcu::Node* node) {
+          Derived::reclaim(node->data<Counter>());
+          dsurcu::Node::del<Counter>(node);
+        };
+        RCU::queue(p);
+        RCU::quiescent();
       }
-      //RCU::quiescent();
       accesses += 1.;
     }
   }
@@ -90,10 +95,10 @@ struct WorkerRDTSC : public Worker<RCU, WorkerRDTSC<RCU>> {
     p->store(_rdtsc(), std::memory_order_relaxed);
   }
 
-  static void reclaim(std::atomic<uint64_t>* p, std::vector<uint64_t>* writer_data) {
+  static void reclaim(Counter* p) {
     uint64_t t1 = _rdtsc();
-    uint64_t t0 = p->load(std::memory_order_acquire);
-    writer_data->emplace_back(t1 - t0);
+    uint64_t t0 = p->time.load(std::memory_order_acquire);
+    p->writer_data->emplace_back(t1 - t0);
   }
 };
 
@@ -129,8 +134,12 @@ void bench(int nthreads, long niter, double read_ratio) {
   std::vector<uint64_t> worker_data(nthreads);
   workers.reserve(nthreads);
 
-  std::atomic<std::atomic<uint64_t>*> time;
-  time.store(new std::atomic<uint64_t>(_rdtsc()));
+  std::atomic<Counter*> time;
+  { Counter* p = dsurcu::rcu_allocate<Counter>();
+    p->time.store(_rdtsc(), std::memory_order_relaxed);
+    p->writer_data = &writer_data;
+    time.store(p, std::memory_order_relaxed);
+  }
 
   std::atomic<int> barrier{nthreads};
 
@@ -173,10 +182,10 @@ void bench(int nthreads, long niter, double read_ratio) {
 
   RCU::fini();
 
-  std::atomic<uint64_t> *p = time.load(std::memory_order_acquire);
-  uint64_t t0 = p->load(std::memory_order_relaxed);
+  Counter* p = time.load(std::memory_order_acquire);
+  uint64_t t0 = p->time.load(std::memory_order_relaxed);
   uint64_t t1 = rcu_end;
-  delete p;
+  dsurcu::rcu_deallocate(p);
 
   double lateness = t1 - t0;
   printf("    RCU: %lu times (wait: % 6lg\tbusy: % 6lg\t% 6lg%%)\n", rcu_iter, double(rcu_wait) / double(rcu_iter), double(rcu_busy) / double(rcu_iter), 100. * double(rcu_busy) / double(rcu_busy + rcu_wait));
@@ -237,8 +246,8 @@ void bench_rcu(int nthreads, long niter, float ratio) {
 
 int main() {
   int nthreads = 10;
-  long niter = 1e7;
-  double ratio = 0.999;
+  long niter = 1e8;
+  double ratio = 0.99;
   printf("Noop:\n");
   bench_rcu<dsurcu::Noop>(nthreads, niter, ratio);
   printf("\nLocalEpochWeak:\n");
