@@ -37,7 +37,16 @@ static uint64_t unoptimizable_zero() noexcept {
   return zero;
 }
 
+static int noop_wait = 0;
+
 namespace dsurcu {
+  void Noop::process_queue_wait() noexcept {
+    futex(&noop_wait, FUTEX_WAIT_PRIVATE, 0, 0, 0, 0);
+  }
+  void Noop::wake() noexcept {
+    noop_wait = 1;
+    futex(&noop_wait, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
+  }
   /**
    * LocalEpoch
    */
@@ -91,7 +100,7 @@ namespace dsurcu {
 #if TASK_FUTEX
     // if there was no task in list, we wake the rcu thread
     if (tail == nullptr) {
-      futex((int*)(&registry.tasks), FUTEX_WAKE, 1, 0, 0, 0);
+      futex((int*)(&registry.tasks), FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
     }
 #endif
   }
@@ -126,7 +135,7 @@ namespace dsurcu {
       deadline.tv_nsec = 1000000; // 1 ms
       // futex would most likely block as readers don't notify anybody
 #if EPOCH_FUTEX
-      futex((int*)(epochs[0].ptr), FUTEX_WAIT, epochs[0].t, &deadline, 0, 0);
+      futex((int*)(epochs[0].ptr), FUTEX_WAIT_PRIVATE, epochs[0].t, &deadline, 0, 0);
 #else
       std::this_thread::yield();
 #endif
@@ -176,31 +185,32 @@ namespace dsurcu {
     // process all the tasks and free their nodes
     do {
       Node* task = tasks;
-      tasks = tasks->next;
+      tasks = task->next;
       task->callback();
       delete task;
     } while (tasks);
   }
 
-  void LocalEpoch::process_queue_worker() {
-    Registry& registry = LocalEpoch::registry;
-
+  void LocalEpoch::process_queue_wait() {
     // wait for a task
 #if TASK_FUTEX
-    futex((int*)(&registry.tasks), FUTEX_WAIT, 0, 0, 0, 0);
+    Registry& registry = LocalEpoch::registry;
+    futex((int*)(&registry.tasks), FUTEX_WAIT_PRIVATE, 0, 0, 0, 0);
 #else
     std::this_thread::yield();
 #endif
-
+  }
+  void LocalEpoch::process_queue_busy() {
+    Registry& registry = LocalEpoch::registry;
     // keep going as long as there are tasks
     while (registry.tasks.load(std::memory_order_relaxed)) {
       process_queue();
     }
   }
-  void LocalEpoch::wake_worker() {
+  void LocalEpoch::wake() {
 #if TASK_FUTEX
     Registry& registry = LocalEpoch::registry;
-    futex((int*)(&registry.tasks), FUTEX_WAKE, 1, 0, 0, 0);
+    futex((int*)(&registry.tasks), FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
 #endif
   }
 
@@ -261,7 +271,7 @@ namespace dsurcu {
 #if TASK_FUTEX
     // if there was no task in list, we wake the rcu thread
     if (tail == nullptr) {
-      futex((int*)(&registry.tasks), FUTEX_WAKE, 1, 0, 0, 0);
+      futex((int*)(&registry.tasks), FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
     }
 #endif
   }
@@ -307,7 +317,7 @@ namespace dsurcu {
       deadline.tv_nsec = 1000000; // 1 ms
       // futex would most likely block as readers don't notify anybody
 #if EPOCH_FUTEX
-      futex((int*)(epochs[0].ptr), FUTEX_WAIT, epochs[0].t, &deadline, 0, 0);
+      futex((int*)(epochs[0].ptr), FUTEX_WAIT_PRIVATE, epochs[0].t, &deadline, 0, 0);
 #else
       std::this_thread::yield();
 #endif
@@ -356,31 +366,32 @@ namespace dsurcu {
     // process all the tasks and free their nodes
     do {
       Node* task = tasks;
-      tasks = tasks->next;
+      tasks = task->next;
       task->callback();
       delete task;
     } while (tasks);
   }
 
-  void LocalEpochWeak::process_queue_worker() {
-    Registry& registry = LocalEpochWeak::registry;
-
+  void LocalEpochWeak::process_queue_wait() {
     // wait for a task
 #if TASK_FUTEX
-    futex((int*)(&registry.tasks), FUTEX_WAIT, 0, 0, 0, 0);
+    Registry& registry = LocalEpochWeak::registry;
+    futex((int*)(&registry.tasks), FUTEX_WAIT_PRIVATE, 0, 0, 0, 0);
 #else
     std::this_thread::yield();
 #endif
-
+  }
+  void LocalEpochWeak::process_queue_busy() {
+    Registry& registry = LocalEpochWeak::registry;
     // keep going as long as there are tasks
     while (registry.tasks.load(std::memory_order_relaxed)) {
       process_queue();
     }
   }
-  void LocalEpochWeak::wake_worker() {
+  void LocalEpochWeak::wake() {
 #if TASK_FUTEX
     Registry& registry = LocalEpochWeak::registry;
-    futex((int*)(&registry.tasks), FUTEX_WAKE, 1, 0, 0, 0);
+    futex((int*)(&registry.tasks), FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
 #endif
   }
 
@@ -442,7 +453,7 @@ namespace dsurcu {
 #if TASK_FUTEX
     // if there was no task in list, we wake the rcu thread
     if (tail == nullptr) {
-      futex((int*)(&registry.tasks), FUTEX_WAKE, 1, 0, 0, 0);
+      futex((int*)(&registry.tasks), FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
     }
 #endif
   }
@@ -479,7 +490,7 @@ namespace dsurcu {
       deadline.tv_nsec = 1000000; // 1 ms
       // futex would most likely block as readers don't notify anybody
 #if EPOCH_FUTEX
-      futex((int*)(epochs[0].ptr), FUTEX_WAIT, epochs[0].t, &deadline, 0, 0);
+      futex((int*)(epochs[0].ptr), FUTEX_WAIT_PRIVATE, epochs[0].t, &deadline, 0, 0);
 #else
       std::this_thread::yield();
 #endif
@@ -528,31 +539,32 @@ namespace dsurcu {
     // process all the tasks and free their nodes
     do {
       Node* task = tasks;
-      tasks = tasks->next;
+      tasks = task->next;
       task->callback();
       delete task;
     } while (tasks);
   }
 
-  void GlobalEpoch::process_queue_worker() {
-    Registry& registry = GlobalEpoch::registry;
-
+  void GlobalEpoch::process_queue_wait() {
     // wait for a task
 #if TASK_FUTEX
-    futex((int*)(&registry.tasks), FUTEX_WAIT, 0, 0, 0, 0);
+    Registry& registry = GlobalEpoch::registry;
+    futex((int*)(&registry.tasks), FUTEX_WAIT_PRIVATE, 0, 0, 0, 0);
 #else
     std::this_thread::yield();
 #endif
-
+  }
+  void GlobalEpoch::process_queue_busy() {
+    Registry& registry = GlobalEpoch::registry;
     // keep going as long as there are tasks
     while (registry.tasks.load(std::memory_order_relaxed)) {
       process_queue();
     }
   }
-  void GlobalEpoch::wake_worker() {
+  void GlobalEpoch::wake() {
 #if TASK_FUTEX
     Registry& registry = GlobalEpoch::registry;
-    futex((int*)(&registry.tasks), FUTEX_WAKE, 1, 0, 0, 0);
+    futex((int*)(&registry.tasks), FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
 #endif
   }
 

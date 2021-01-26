@@ -102,13 +102,23 @@ void bench(int nthreads, long niter, double read_ratio) {
   using RCU = typename Worker::RCU;
   RCU::init();
 
+  uint64_t rcu_wait = 0, rcu_busy = 0, rcu_end = 0, rcu_iter = 0;
+
   // RCU thread: when there is some tasks to complete, wait for readers to finish their critical sections
   std::atomic<bool> stop{false};
-  std::thread rcu([&stop]() {
+  std::thread rcu([&]() {
     do {
-      RCU::process_queue_worker();
+      uint64_t t0 = _rdtsc();
+      RCU::process_queue_wait();
+      uint64_t t1 = _rdtsc();
+      RCU::process_queue_busy();
+      uint64_t t2 = _rdtsc();
+      rcu_wait += t1 - t0;
+      rcu_busy += t2 - t1;
+      rcu_iter += 1;
     // stop is required
     } while (!stop.load());
+    rcu_end = _rdtsc();
   });
 
 
@@ -158,13 +168,18 @@ void bench(int nthreads, long niter, double read_ratio) {
 
   // stop the RCU thread
   stop.store(true);
-  RCU::wake_worker();
+  RCU::wake();
   rcu.join();
 
   RCU::fini();
 
   std::atomic<uint64_t> *p = time.load(std::memory_order_acquire);
+  uint64_t t0 = p->load(std::memory_order_relaxed);
+  uint64_t t1 = rcu_end;
   delete p;
+
+  double lateness = t1 - t0;
+  printf("    RCU: %lu times (wait: % 6lg\tbusy: % 6lg\t% 6lg%%)\n", rcu_iter, double(rcu_wait) / double(rcu_iter), double(rcu_busy) / double(rcu_iter), 100. * double(rcu_busy) / double(rcu_busy + rcu_wait));
 
 
   if (worker_data.size() > 0) {
@@ -205,6 +220,7 @@ void bench(int nthreads, long niter, double read_ratio) {
     printf("    90%%: % 6lg\n", p90);
     printf("    99%%: % 6lg\n", p99);
     printf("    max: % 6lg\n", max);
+    printf("    lateness: % 6lg\n", lateness);
   }
 }
 
@@ -221,8 +237,8 @@ void bench_rcu(int nthreads, long niter, float ratio) {
 
 int main() {
   int nthreads = 10;
-  long niter = 1e6;
-  double ratio = 0.0;
+  long niter = 1e7;
+  double ratio = 0.999;
   printf("Noop:\n");
   bench_rcu<dsurcu::Noop>(nthreads, niter, ratio);
   printf("\nLocalEpochWeak:\n");

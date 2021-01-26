@@ -56,8 +56,9 @@ namespace dsurcu {
     static void queue(F const&) noexcept {}
     static void synchronize() noexcept {}
     static void process_queue() noexcept {}
-    static void process_queue_worker() noexcept {}
-    static void wake_worker() noexcept {}
+    static void process_queue_wait() noexcept;
+    static void process_queue_busy() noexcept {}
+    static void wake() noexcept;
   };
 
   template <class RCU>
@@ -126,8 +127,9 @@ namespace dsurcu {
     static void queue(std::function<void()>);
     static void synchronize();
     static void process_queue();
-    static void process_queue_worker();
-    static void wake_worker();
+    static void process_queue_wait();
+    static void process_queue_busy();
+    static void wake();
   };
 
   struct LocalEpochWeak {
@@ -158,8 +160,9 @@ namespace dsurcu {
     static void queue(std::function<void()>);
     static void synchronize();
     static void process_queue();
-    static void process_queue_worker();
-    static void wake_worker();
+    static void process_queue_wait();
+    static void process_queue_busy();
+    static void wake();
   };
 
   struct GlobalEpoch {
@@ -190,7 +193,8 @@ namespace dsurcu {
     static void queue(std::function<void()>);
     static void synchronize();
     static void process_queue();
-    static void process_queue_worker();
-    static void wake_worker();
+    static void process_queue_wait();
+    static void process_queue_busy();
+    static void wake();
   };
 }
